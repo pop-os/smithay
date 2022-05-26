@@ -200,18 +200,19 @@ impl Space {
             use std::sync::atomic::{AtomicBool, Ordering};
 
             if let Some(window) = self.windows.iter().find(|w| {
-                let toplevel = w.toplevel().get_surface().unwrap();
-                let found = AtomicBool::new(false);
-                with_surface_tree_downward(
-                    toplevel,
-                    surface,
-                    |_, _, search| TraversalAction::DoChildren(search),
-                    |s, _, search| {
-                        found.fetch_or(s == *search, Ordering::SeqCst);
-                    },
-                    |_, _, _| !found.load(Ordering::SeqCst),
-                );
-                found.load(Ordering::SeqCst)
+                if let Some(toplevel) = w.toplevel().get_surface() {
+                    let found = AtomicBool::new(false);
+                    with_surface_tree_downward(
+                        toplevel,
+                        surface,
+                        |_, _, search| TraversalAction::DoChildren(search),
+                        |s, _, search| {
+                            found.fetch_or(s == *search, Ordering::SeqCst);
+                        },
+                        |_, _, _| !found.load(Ordering::SeqCst),
+                    );
+                    found.load(Ordering::SeqCst)
+                } else { false }
             }) {
                 return Some(window);
             }
@@ -219,12 +220,16 @@ impl Space {
 
         if surface_type.contains(WindowSurfaceType::POPUP) {
             if let Some(window) = self.windows.iter().find(|w| {
-                PopupManager::popups_for_surface(w.toplevel().get_surface().unwrap())
-                    .ok()
-                    .map(|mut popups| {
-                        popups.any(|(p, _)| p.get_surface().map(|s| s == surface).unwrap_or(false))
-                    })
-                    .unwrap_or(false)
+                if let Some(toplevel) = w.toplevel().get_surface() {
+                    PopupManager::popups_for_surface(toplevel)
+                        .ok()
+                        .map(|mut popups| {
+                            popups.any(|(p, _)| p.get_surface().map(|s| s == surface).unwrap_or(false))
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
             }) {
                 return Some(window);
             }
