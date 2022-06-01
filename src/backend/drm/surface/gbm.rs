@@ -58,7 +58,7 @@ where
         // Once we have proper color management and possibly HDR support,
         // we need to have a more sophisticated picker.
         // (Or maybe just pick ARGB2101010, if available, we will see.)
-        let mut code = Fourcc::Argb8888;
+        let mut code = Fourcc::Xrgb8888;
         let logger = crate::slog_or_fallback(log).new(o!("backend" => "drm_render"));
 
         // select a format
@@ -380,7 +380,7 @@ where
                 }));
             }
             debug!(logger, "Failed to add framebuffer, trying legacy method");
-            drm.add_framebuffer(bo, 32, 32)
+            drm.add_framebuffer(bo, 24, 32)
                 .map_err(|source| DrmError::Access {
                     errmsg: "Failed to add framebuffer",
                     dev: drm.dev_path(),
