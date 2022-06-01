@@ -369,6 +369,7 @@ where
     } {
         Ok(fb) => fb,
         Err(source) => {
+            dbg!(bo);
             // We only support this as a fallback of last resort for ARGB8888 visuals,
             // like xf86-video-modesetting does.
             if drm::buffer::Buffer::format(bo) != Fourcc::Argb8888 || bo.handles()[1].is_some() {
