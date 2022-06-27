@@ -159,6 +159,14 @@ pub enum X11Event {
         /// XID of the window
         window_id: u32,
     },
+
+    EnterEvent {
+        window_id: u32,
+    },
+
+    LeaveEvent {
+        window_id: u32,
+    },
 }
 
 /// Represents an active connection to the X to manage events on the Window provided by the backend.
@@ -418,6 +426,7 @@ impl X11Handle {
 pub struct WindowBuilder<'a> {
     name: Option<&'a str>,
     size: Option<Size<u16, Logical>>,
+    grab_keyboard: bool,
 }
 
 impl<'a> WindowBuilder<'a> {
@@ -427,6 +436,7 @@ impl<'a> WindowBuilder<'a> {
         WindowBuilder {
             name: None,
             size: None,
+            grab_keyboard: false,
         }
     }
 
@@ -449,6 +459,17 @@ impl<'a> WindowBuilder<'a> {
         }
     }
 
+    /// Sets the size of the window that will be created.
+    ///
+    /// There is no guarantee the size specified here will be the actual size of the window when it is
+    /// presented.
+    pub fn set_grab_keyboard(self, active: bool) -> Self {
+        Self {
+            grab_keyboard: active,
+            ..self
+        }
+    }
+
     /// Creates a window using the options specified in the builder.
     pub fn build(self, handle: &X11Handle) -> Result<Window, X11Error> {
         let connection = handle.connection();
@@ -466,6 +487,7 @@ impl<'a> WindowBuilder<'a> {
             inner.visual_id,
             inner.colormap,
             inner.extensions,
+            self.grab_keyboard,
         )?);
 
         let downgrade = Arc::downgrade(&window);
@@ -859,6 +881,7 @@ impl X11Inner {
                     X11Inner::window_ref_from_id(inner, &enter_notify.event).and_then(|w| w.upgrade())
                 {
                     window.cursor_enter();
+                    (callback)(X11Event::EnterEvent { window_id: window.id }, &mut ());
                 }
             }
 
@@ -867,6 +890,7 @@ impl X11Inner {
                     X11Inner::window_ref_from_id(inner, &leave_notify.event).and_then(|w| w.upgrade())
                 {
                     window.cursor_leave();
+                    (callback)(X11Event::LeaveEvent { window_id: window.id }, &mut ());
                 }
             }
 

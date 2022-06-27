@@ -19,6 +19,7 @@ use std::sync::{
     Arc, Mutex, Weak,
 };
 use x11rb::{
+    self,
     connection::Connection,
     protocol::{
         present::{self, ConnectionExt as _},
@@ -70,6 +71,7 @@ pub(crate) struct WindowInner {
     pub format: DrmFourcc,
     pub depth: Depth,
     pub extensions: Extensions,
+    pub grab_keyboard: bool,
 }
 
 impl WindowInner {
@@ -85,6 +87,7 @@ impl WindowInner {
         visual_id: u32,
         colormap: u32,
         extensions: Extensions,
+        grab_keyboard: bool,
     ) -> Result<WindowInner, X11Error> {
         let weak = connection;
         let connection = weak.upgrade().unwrap();
@@ -159,6 +162,7 @@ impl WindowInner {
             format,
             depth,
             extensions,
+            grab_keyboard,
             resize: Mutex::new(None),
         };
 
@@ -261,6 +265,17 @@ impl WindowInner {
             let mut state = self.cursor_state.lock().unwrap();
             state.inside_window = true;
             self.update_cursor(&*connection, state.visible);
+            if self.grab_keyboard {
+                connection
+                    .grab_keyboard(
+                        false,
+                        self.id,
+                        x11rb::CURRENT_TIME,
+                        x11::GrabMode::ASYNC,
+                        x11::GrabMode::ASYNC,
+                    )
+                    .unwrap();
+            }
         }
     }
 
@@ -269,6 +284,9 @@ impl WindowInner {
             let mut state = self.cursor_state.lock().unwrap();
             state.inside_window = false;
             self.update_cursor(&*connection, true);
+            if self.grab_keyboard {
+                connection.ungrab_keyboard(x11rb::CURRENT_TIME).unwrap();
+            }
         }
     }
 

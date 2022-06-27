@@ -194,6 +194,10 @@ impl KbdInternal {
         }
     }
 
+    fn reset_modifiers(&mut self) {
+        self.state.update_mask(0, 0, 0, 0, 0, 0);
+    }
+
     fn serialize_modifiers(&self) -> (u32, u32, u32, u32) {
         let mods_depressed = self.state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
         let mods_latched = self.state.serialize_mods(xkb::STATE_MODS_LATCHED);
@@ -521,6 +525,11 @@ impl KeyboardHandle {
         }
 
         None
+    }
+
+    pub fn reset_modifiers(&self) {
+        let mut guard = self.arc.internal.borrow_mut();
+        guard.reset_modifiers();
     }
 
     /// Set the current focus of this keyboard
