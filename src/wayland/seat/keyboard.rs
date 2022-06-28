@@ -196,6 +196,7 @@ impl KbdInternal {
 
     fn reset_modifiers(&mut self) {
         self.state.update_mask(0, 0, 0, 0, 0, 0);
+        self.mods_state.update_with(&self.state);
     }
 
     fn serialize_modifiers(&self) -> (u32, u32, u32, u32) {
