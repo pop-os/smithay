@@ -56,7 +56,7 @@ fn main() {
     let connector_info = res_handles
         .connectors()
         .iter()
-        .map(|conn| device.get_connector(*conn).unwrap())
+        .map(|conn| device.get_connector(*conn, true).unwrap())
         .find(|conn| conn.state() == ConnectorState::Connected)
         .unwrap();
 
@@ -64,10 +64,9 @@ fn main() {
     let encoder = connector_info
         .encoders()
         .iter()
-        .filter_map(|&e| e)
         .next()
         .unwrap();
-    let encoder_info = device.get_encoder(encoder).unwrap();
+    let encoder_info = device.get_encoder(*encoder).unwrap();
 
     // use the connected crtc if any
     let crtc = encoder_info

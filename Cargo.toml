@@ -41,7 +41,7 @@ lazy_static = "1"
 libc = "0.2.103"
 libseat= { version = "0.1.1", optional = true }
 libloading = { version="0.7.0", optional = true } 
-nix = "0.22"
+nix = "0.24"
 once_cell = "1.8.0"
 rand = "0.8.4"
 scopeguard = { version = "1.1.0", optional = true }
@@ -63,6 +63,8 @@ scan_fmt = { version = "0.2.3", default-features = false }
 
 [patch.crates-io]
 winit = { git = "https://github.com/rust-windowing/winit", rev = "4c39b3188cee29548761b57f38e4aa046cbe31ea" }
+drm-ffi = { git = "https://github.com/Smithay/drm-rs", branch = "feature/force_probe" }
+drm = { git = "https://github.com/Smithay/drm-rs", branch = "feature/force_probe" }
 
 [dev-dependencies]
 slog-term = "2.3"
