@@ -106,3 +106,6 @@ required-features = ["wayland_frontend"]
 [[example]]
 name = "vulkan"
 required-features = ["backend_vulkan"]
+
+[patch."https://github.com/Smithay/drm-rs.git"]
+drm = { git = "https://github.com/Smithay//drm-rs", branch = "fix/non_force_probe_memory" }
