@@ -116,6 +116,7 @@ mod atoms {
 
             // data formats
             UTF8_STRING,
+            TEXT,
 
             // client -> server
             WM_HINTS,
@@ -156,6 +157,13 @@ mod atoms {
             _NET_WM_STATE_FULLSCREEN,
             _NET_WM_STATE_FOCUSED,
             _NET_SUPPORTING_WM_CHECK,
+
+            // selection
+            CLIPBOARD_MANAGER,
+            CLIPBOARD,
+            PRIMARY,
+            TARGETS,
+            INCR,
         }
     }
 }
