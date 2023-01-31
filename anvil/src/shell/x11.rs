@@ -4,9 +4,17 @@ use smithay::{
     desktop::space::SpaceElement,
     input::pointer::Focus,
     utils::{Logical, Rectangle, SERIAL_COUNTER},
-    wayland::compositor::with_states,
+    wayland::{
+        compositor::with_states,
+        data_device::{
+            clear_data_device_selection, current_data_device_selection_userdata, set_data_device_selection,
+        },
+        primary_selection::{
+            clear_primary_selection, current_primary_selection_userdata, set_primary_selection,
+        },
+    },
     xwayland::{
-        xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId},
+        xwm::{Reorder, ResizeEdge as X11ResizeEdge, SelectionType, XwmId},
         X11Surface, X11Wm, XwmHandler,
     },
 };
@@ -228,6 +236,39 @@ impl<BackendData: Backend> XwmHandler for CalloopData<BackendData> {
 
     fn move_request(&mut self, _xwm: XwmId, window: X11Surface, _button: u32) {
         self.state.move_request_x11(&window)
+    }
+
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionType, mime_types: Vec<String>) {
+        slog::info!(
+            self.state.log,
+            "Got Selection {:?} from X11: {:?}",
+            selection,
+            mime_types
+        );
+        // TODO check, that focused windows is X11 window before doing this
+        match selection {
+            SelectionType::Clipboard => {
+                set_data_device_selection(&self.state.display_handle, &self.state.seat, mime_types, ())
+            }
+            SelectionType::Primary => {
+                set_primary_selection(&self.state.display_handle, &self.state.seat, mime_types, ())
+            }
+        }
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionType) {
+        match selection {
+            SelectionType::Clipboard => {
+                if current_data_device_selection_userdata(&self.state.seat).is_some() {
+                    clear_data_device_selection(&self.state.display_handle, &self.state.seat)
+                }
+            }
+            SelectionType::Primary => {
+                if current_primary_selection_userdata(&self.state.seat).is_some() {
+                    clear_primary_selection(&self.state.display_handle, &self.state.seat)
+                }
+            }
+        }
     }
 }
 

@@ -65,6 +65,7 @@ use smithay::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
     },
+    xwayland::xwm::SelectionType,
 };
 
 #[cfg(feature = "xwayland")]
@@ -150,8 +151,12 @@ impl<BackendData: Backend> DataDeviceHandler for AnvilState<BackendData> {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
     }
-    fn send_selection(&mut self, _mime_type: String, _fd: OwnedFd) {
-        unreachable!("Anvil doesn't do server-side selections");
+    fn send_selection(&mut self, mime_type: String, fd: OwnedFd, _user_data: &()) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.send_selection(SelectionType::Clipboard, mime_type, fd) {
+                warn!(self.log, "Failed to send clipboard (X11 -> Wayland): {}", err);
+            }
+        }
     }
 }
 impl<BackendData: Backend> ClientDndGrabHandler for AnvilState<BackendData> {
@@ -175,6 +180,14 @@ impl<BackendData: Backend> PrimarySelectionHandler for AnvilState<BackendData> {
     type SelectionUserData = ();
     fn primary_selection_state(&self) -> &PrimarySelectionState {
         &self.primary_selection_state
+    }
+
+    fn send_selection(&mut self, mime_type: String, fd: OwnedFd, _user_data: &()) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.send_selection(SelectionType::Primary, mime_type, fd) {
+                warn!(self.log, "Failed to send primary (X11 -> Wayland): {}", err);
+            }
+        }
     }
 }
 delegate_primary_selection!(@<BackendData: Backend + 'static> AnvilState<BackendData>);
