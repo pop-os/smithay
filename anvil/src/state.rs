@@ -145,6 +145,8 @@ pub struct AnvilState<BackendData: Backend + 'static> {
 delegate_compositor!(@<BackendData: Backend + 'static> AnvilState<BackendData>);
 
 impl<BackendData: Backend> DataDeviceHandler for AnvilState<BackendData> {
+    type SelectionUserData = ();
+
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
     }
@@ -170,6 +172,7 @@ delegate_data_device!(@<BackendData: Backend + 'static> AnvilState<BackendData>)
 delegate_output!(@<BackendData: Backend + 'static> AnvilState<BackendData>);
 
 impl<BackendData: Backend> PrimarySelectionHandler for AnvilState<BackendData> {
+    type SelectionUserData = ();
     fn primary_selection_state(&self) -> &PrimarySelectionState {
         &self.primary_selection_state
     }

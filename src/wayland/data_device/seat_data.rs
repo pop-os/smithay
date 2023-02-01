@@ -18,19 +18,19 @@ use crate::utils::IsAlive;
 
 use super::{with_source_metadata, DataDeviceHandler, SourceMetadata};
 
-pub enum Selection {
+pub enum Selection<U: Clone + Send + Sync + 'static> {
     Empty,
     Client(WlDataSource),
-    Compositor(SourceMetadata),
+    Compositor { metadata: SourceMetadata, user_data: U },
 }
 
-pub struct SeatData {
+pub struct SeatData<U: Clone + Send + Sync + 'static> {
     known_devices: Vec<WlDataDevice>,
-    selection: Selection,
+    selection: Selection<U>,
     current_focus: Option<Client>,
 }
 
-impl Default for SeatData {
+impl<U: Clone + Send + Sync + 'static> Default for SeatData<U> {
     fn default() -> Self {
         Self {
             known_devices: Vec::new(),
@@ -40,7 +40,7 @@ impl Default for SeatData {
     }
 }
 
-impl SeatData {
+impl<U: Clone + Send + Sync + 'static> SeatData<U> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -60,9 +60,9 @@ impl SeatData {
         self.known_devices.retain(f)
     }
 
-    pub fn set_selection<D>(&mut self, dh: &DisplayHandle, new_selection: Selection)
+    pub fn set_selection<D>(&mut self, dh: &DisplayHandle, new_selection: Selection<U>)
     where
-        D: DataDeviceHandler,
+        D: DataDeviceHandler<SelectionUserData = U>,
         D: 'static,
     {
         if let Selection::Client(data_source) = &self.selection {
@@ -77,9 +77,13 @@ impl SeatData {
         self.send_selection::<D>(dh);
     }
 
+    pub fn get_selection(&self) -> &Selection<U> {
+        &self.selection
+    }
+
     pub fn set_focus<D>(&mut self, dh: &DisplayHandle, new_focus: Option<Client>)
     where
-        D: DataDeviceHandler,
+        D: DataDeviceHandler<SelectionUserData = U>,
         D: 'static,
     {
         self.current_focus = new_focus;
@@ -88,7 +92,7 @@ impl SeatData {
 
     pub fn send_selection<D>(&mut self, dh: &DisplayHandle)
     where
-        D: DataDeviceHandler,
+        D: DataDeviceHandler<SelectionUserData = U>,
         D: 'static,
     {
         let client = match self.current_focus.as_ref() {
@@ -149,7 +153,10 @@ impl SeatData {
                     dd.selection(Some(&offer));
                 }
             }
-            Selection::Compositor(ref meta) => {
+            Selection::Compositor {
+                metadata: ref meta,
+                ref user_data,
+            } => {
                 for dd in &self.known_devices {
                     // skip data devices not belonging to our client
                     if dh.get_client(dd.id()).map(|c| &c != client).unwrap_or(true) {
@@ -165,7 +172,10 @@ impl SeatData {
                             client.id(),
                             WlDataOffer::interface(),
                             dd.version(),
-                            Arc::new(ServerSelection { offer_meta }),
+                            Arc::new(ServerSelection {
+                                offer_meta,
+                                user_data: user_data.clone(),
+                            }),
                         )
                         .unwrap();
                     let offer = WlDataOffer::from_id(dh, offer).unwrap();
@@ -233,11 +243,12 @@ where
     }
 }
 
-struct ServerSelection {
+struct ServerSelection<U: Clone + Send + Sync + 'static> {
     offer_meta: SourceMetadata,
+    user_data: U,
 }
 
-impl<D> ObjectData<D> for ServerSelection
+impl<D> ObjectData<D> for ServerSelection<D::SelectionUserData>
 where
     D: DataDeviceHandler,
 {
@@ -250,7 +261,7 @@ where
     ) -> Option<Arc<dyn ObjectData<D>>> {
         let dh = DisplayHandle::from(dh.clone());
         if let Ok((_resource, request)) = WlDataOffer::parse_request(&dh, msg) {
-            handle_server_selection(handler, request, &self.offer_meta);
+            handle_server_selection(handler, request, &self.offer_meta, &self.user_data);
         }
 
         None
@@ -263,6 +274,7 @@ pub fn handle_server_selection<D>(
     handler: &mut D,
     request: wl_data_offer::Request,
     offer_meta: &SourceMetadata,
+    user_data: &D::SelectionUserData,
 ) where
     D: DataDeviceHandler,
 {
@@ -278,7 +290,7 @@ pub fn handle_server_selection<D>(
                 "Denying a wl_data_offer.receive with invalid source."
             );
         } else {
-            handler.send_selection(mime_type, fd);
+            handler.send_selection(mime_type, fd, user_data);
         }
     }
 }
