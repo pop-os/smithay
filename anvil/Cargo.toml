@@ -54,4 +54,4 @@ udev = [
 ]
 winit = ["smithay/backend_winit"]
 x11 = ["smithay/backend_x11", "x11rb", "egl", "smithay/renderer_gl"]
-xwayland = ["smithay/xwayland", "x11rb", "smithay/x11rb_event_source"]
+xwayland = ["smithay/xwayland", "x11rb", "smithay/x11rb_event_source", "xcursor"]
