@@ -2,7 +2,7 @@
 
 use crate::{
     backend::renderer::{
-        element::{Element, Id, RenderElement},
+        element::{Element, Id, RenderElement, UnderlyingStorage},
         utils::CommitCounter,
     },
     utils::{Buffer, Logical, Physical, Rectangle, Scale, Transform},
@@ -106,9 +106,15 @@ impl RenderElement<Gles2Renderer> for PixelShaderElement {
             &self.additional_uniforms,
         )
     }
+
+    fn underlying_storage(&self, _renderer: &mut Gles2Renderer) -> Option<UnderlyingStorage> {
+        None
+    }
 }
 
-/// Wrapping Render element to replace the default texture shader used
+/// Wrapping Render element to replace the default texture shader used.
+///
+/// **Note*: This will disallow direct-scanout to happen, e.g. when using the [`DrmCompositor`].
 #[derive(Debug)]
 pub struct TextureShaderWrapperElement<E> {
     shader: Gles2TexProgram,
@@ -218,5 +224,9 @@ where
         let result = self.element.draw(frame, src, dst, damage);
         frame.clear_tex_program_override();
         result
+    }
+
+    fn underlying_storage(&self, _renderer: &mut Gles2Renderer) -> Option<UnderlyingStorage> {
+        None
     }
 }

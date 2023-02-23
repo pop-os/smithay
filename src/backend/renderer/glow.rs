@@ -14,6 +14,7 @@ use crate::{
         allocator::{dmabuf::Dmabuf, Format},
         egl::EGLContext,
         renderer::{
+            element::UnderlyingStorage,
             gles2::{element::*, *},
             Bind, Blit, DebugFlags, ExportDma, ExportMem, ImportDma, ImportMem, Offscreen, Renderer,
             TextureFilter, Unbind,
@@ -459,6 +460,10 @@ impl RenderElement<GlowRenderer> for PixelShaderElement {
     ) -> Result<(), Gles2Error> {
         RenderElement::<Gles2Renderer>::draw(self, frame.borrow_mut(), src, dst, damage)
     }
+
+    fn underlying_storage(&self, renderer: &mut GlowRenderer) -> Option<UnderlyingStorage> {
+        RenderElement::<Gles2Renderer>::underlying_storage(self, renderer.borrow_mut())
+    }
 }
 
 impl<E> RenderElement<GlowRenderer> for TextureShaderWrapperElement<E>
@@ -472,6 +477,10 @@ where
         dst: Rectangle<i32, Physical>,
         damage: &[Rectangle<i32, Physical>],
     ) -> Result<(), Gles2Error> {
-        RenderElement::<GlowRenderer>::draw(&self.element, frame.borrow_mut(), src, dst, damage)
+        self.element.draw(frame, src, dst, damage)
+    }
+
+    fn underlying_storage(&self, renderer: &mut GlowRenderer) -> Option<UnderlyingStorage> {
+        self.element.underlying_storage(renderer)
     }
 }
