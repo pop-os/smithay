@@ -460,3 +460,18 @@ impl RenderElement<GlowRenderer> for PixelShaderElement {
         RenderElement::<Gles2Renderer>::draw(self, frame.borrow_mut(), src, dst, damage)
     }
 }
+
+impl<E> RenderElement<GlowRenderer> for TextureShaderWrapperElement<E>
+where
+    E: RenderElement<GlowRenderer>,
+{
+    fn draw<'a>(
+        &self,
+        frame: &mut GlowFrame<'a>,
+        src: Rectangle<f64, BufferCoord>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+    ) -> Result<(), Gles2Error> {
+        RenderElement::<GlowRenderer>::draw(&self.element, frame.borrow_mut(), src, dst, damage)
+    }
+}

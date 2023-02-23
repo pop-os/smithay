@@ -8,7 +8,7 @@ use crate::{
     utils::{Buffer, Logical, Physical, Rectangle, Scale, Transform},
 };
 
-use super::{Gles2Error, Gles2Frame, Gles2PixelProgram, Gles2Renderer, Uniform};
+use super::{Gles2Error, Gles2Frame, Gles2PixelProgram, Gles2Renderer, Gles2TexProgram, Uniform};
 
 /// Render element for drawing with a gles2 pixel shader
 #[derive(Debug)]
@@ -105,5 +105,118 @@ impl RenderElement<Gles2Renderer> for PixelShaderElement {
             self.alpha,
             &self.additional_uniforms,
         )
+    }
+}
+
+/// Wrapping Render element to replace the default texture shader used
+#[derive(Debug)]
+pub struct TextureShaderWrapperElement<E> {
+    shader: Gles2TexProgram,
+    opaque_regions: Option<Vec<Rectangle<i32, Logical>>>,
+    additional_uniforms: Vec<Uniform<'static>>,
+    pub(crate) element: E,
+}
+
+impl<E> TextureShaderWrapperElement<E> {
+    /// Create a new [`TextureShaderWrapperElement`] wrapping an existing [`RenderElement`]
+    /// replacing the default texture shader.
+    ///
+    /// The `opaque_regions` parameter can be used to override the regions, should the shader
+    /// change them. This is required to avoid rendering errors. Passing `None` will
+    /// cause the regions from the underlying element to be passed through.
+    pub fn new(
+        shader: Gles2TexProgram,
+        additional_uniforms: Vec<Uniform<'_>>,
+        opaque_regions: Option<Vec<Rectangle<i32, Logical>>>,
+        element: E,
+    ) -> Self {
+        TextureShaderWrapperElement {
+            shader,
+            additional_uniforms: additional_uniforms.into_iter().map(|u| u.into_owned()).collect(),
+            opaque_regions,
+            element,
+        }
+    }
+
+    /// Override the opaque regions, should the shader change them.
+    /// This is required to avoid rendering errors.
+    ///
+    /// Setting `None` will cause the regions from the underlying element to be passed through instead.
+    pub fn update_opaque_regions(&mut self, opaque_regions: Option<Vec<Rectangle<i32, Logical>>>) {
+        self.opaque_regions = opaque_regions;
+    }
+
+    /// Update the additional uniforms
+    /// (see [`Gles2Renderer::compile_custom_pixel_shader`] and [`Gles2Renderer::render_pixel_shader_to`]).
+    ///
+    /// This replaces the stored uniforms, you have to update all of them, partial updates are not possible.
+    pub fn update_uniforms(&mut self, additional_uniforms: Vec<Uniform<'_>>) {
+        self.additional_uniforms = additional_uniforms.into_iter().map(|u| u.into_owned()).collect();
+    }
+}
+
+impl<E> Element for TextureShaderWrapperElement<E>
+where
+    E: Element,
+{
+    fn id(&self) -> &Id {
+        self.element.id()
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.element.current_commit()
+    }
+
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        self.element.src()
+    }
+
+    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.element.geometry(scale)
+    }
+
+    fn opaque_regions(&self, scale: Scale<f64>) -> Vec<Rectangle<i32, Physical>> {
+        if let Some(regions) = self.opaque_regions.as_ref() {
+            regions
+                .iter()
+                .map(|region| region.to_physical_precise_round(scale))
+                .collect()
+        } else {
+            self.element.opaque_regions(scale)
+        }
+    }
+
+    fn damage_since(
+        &self,
+        scale: Scale<f64>,
+        commit: Option<CommitCounter>,
+    ) -> Vec<Rectangle<i32, Physical>> {
+        self.element.damage_since(scale, commit)
+    }
+
+    fn location(&self, scale: Scale<f64>) -> crate::utils::Point<i32, Physical> {
+        self.element.location(scale)
+    }
+
+    fn transform(&self) -> Transform {
+        self.element.transform()
+    }
+}
+
+impl<E> RenderElement<Gles2Renderer> for TextureShaderWrapperElement<E>
+where
+    E: RenderElement<Gles2Renderer>,
+{
+    fn draw<'a>(
+        &self,
+        frame: &mut Gles2Frame<'a>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+    ) -> Result<(), Gles2Error> {
+        frame.override_default_tex_program(self.shader.clone(), self.additional_uniforms.clone());
+        let result = self.element.draw(frame, src, dst, damage);
+        frame.clear_tex_program_override();
+        result
     }
 }
