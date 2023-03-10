@@ -30,7 +30,7 @@ use smithay::{
             dmabuf::{AnyError, Dmabuf, DmabufAllocator},
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
             vulkan::{ImageUsageFlags, VulkanAllocator},
-            Allocator,
+            Allocator, Fourcc,
         },
         drm::{
             compositor::DrmCompositor, CreateDrmNodeError, DrmDevice, DrmDeviceFd, DrmError, DrmEvent,
@@ -94,6 +94,20 @@ use smithay::{
     },
 };
 use tracing::{debug, error, info, trace, warn};
+
+// we cannot simply pick the first supported format of the intersection of *all* formats, because:
+// - we do not want something like Abgr4444, which looses color information, if something better is available
+// - some formats might perform terribly
+// - we might need some work-arounds, if one supports modifiers, but the other does not
+//
+// So lets just pick `ARGB2101010` (10-bit) or `ARGB8888` (8-bit) for now, they are widely supported.
+const SUPPORTED_FORMATS: &[Fourcc] = &[
+    Fourcc::Abgr2101010,
+    Fourcc::Argb2101010,
+    Fourcc::Abgr8888,
+    Fourcc::Argb8888,
+];
+const SUPPORTED_FORMATS_8BIT_ONLY: &[Fourcc] = &[Fourcc::Abgr8888, Fourcc::Argb8888];
 
 type UdevRenderer<'a, 'b> =
     MultiRenderer<'a, 'a, 'b, GbmGlesBackend<Gles2Renderer>, GbmGlesBackend<Gles2Renderer>>;
@@ -372,6 +386,7 @@ pub fn run_udev() {
         let fps_texture = renderer
             .import_memory(
                 &fps_image.to_rgba8(),
+                Fourcc::Abgr8888,
                 (fps_image.width() as i32, fps_image.height() as i32).into(),
                 false,
             )
@@ -733,8 +748,19 @@ fn scan_connectors(
             let allocator =
                 GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
 
+            let color_formats = if std::env::var("ANVIL_DISABLE_10BIT").is_ok() {
+                SUPPORTED_FORMATS_8BIT_ONLY
+            } else {
+                SUPPORTED_FORMATS
+            };
+
             let compositor = if std::env::var("ANVIL_DISABLE_DRM_COMPOSITOR").is_ok() {
-                let gbm_surface = match GbmBufferedSurface::new(surface, allocator, render_formats.clone()) {
+                let gbm_surface = match GbmBufferedSurface::new(
+                    surface,
+                    allocator,
+                    color_formats,
+                    render_formats.clone(),
+                ) {
                     Ok(renderer) => renderer,
                     Err(err) => {
                         warn!("Failed to create rendering surface: {}", err);
@@ -780,6 +806,7 @@ fn scan_connectors(
                     Some(planes),
                     allocator,
                     gbm.clone(),
+                    color_formats,
                     render_formats.clone(),
                     device.cursor_size(),
                     Some(gbm.clone()),
