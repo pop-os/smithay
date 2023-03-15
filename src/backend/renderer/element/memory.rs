@@ -37,6 +37,9 @@
 //! #     fn height(&self) -> u32 {
 //! #         unimplemented!()
 //! #     }
+//! #     fn format(&self) -> Option<Fourcc> {
+//! #         unimplemented!()
+//! #     }
 //! # }
 //! #
 //! # struct FakeFrame;
@@ -98,6 +101,7 @@
 //! #     fn import_memory(
 //! #         &mut self,
 //! #         _: &[u8],
+//! #         _: Fourcc,
 //! #         _: Size<i32, Buffer>,
 //! #         _: bool,
 //! #     ) -> Result<Self::TextureId, Self::Error> {
@@ -111,13 +115,19 @@
 //! #     ) -> Result<(), Self::Error> {
 //! #         unimplemented!()
 //! #     }
+//! #     fn mem_formats(&self) -> Box<dyn Iterator<Item=Fourcc>> {
+//! #         unimplemented!()
+//! #     }
 //! # }
 //! use std::time::{Duration, Instant};
 //!
 //! use smithay::{
-//!     backend::renderer::{
-//!         damage::DamageTrackedRenderer,
-//!         element::memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+//!     backend::{
+//!         allocator::Fourcc,
+//!         renderer::{
+//!             damage::DamageTrackedRenderer,
+//!             element::memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+//!         },
 //!     },
 //!     utils::{Point, Rectangle, Size, Transform},
 //! };
@@ -126,7 +136,7 @@
 //! const HEIGHT: i32 = 10;
 //!
 //! // Initialize a empty render buffer
-//! let mut buffer = MemoryRenderBuffer::new((WIDTH, HEIGHT), 1, Transform::Normal, None);
+//! let mut buffer = MemoryRenderBuffer::new(Fourcc::Argb8888, (WIDTH, HEIGHT), 1, Transform::Normal, None);
 //!
 //! // Create a rendering context
 //! let mut render_context = buffer.render();
@@ -193,9 +203,12 @@ use std::{
 use tracing::{instrument, trace, warn};
 
 use crate::{
-    backend::renderer::{
-        utils::{CommitCounter, DamageTracker},
-        Frame, ImportMem, Renderer,
+    backend::{
+        allocator::{format::get_bpp, Fourcc},
+        renderer::{
+            utils::{CommitCounter, DamageTracker},
+            Frame, ImportMem, Renderer,
+        },
     },
     utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
 };
@@ -205,6 +218,7 @@ use super::{Element, Id, RenderElement};
 #[derive(Debug)]
 struct MemoryRenderBufferInner {
     mem: Vec<u8>,
+    format: Fourcc,
     size: Size<i32, Buffer>,
     scale: i32,
     transform: Transform,
@@ -218,6 +232,7 @@ impl Default for MemoryRenderBufferInner {
     fn default() -> Self {
         MemoryRenderBufferInner {
             mem: Vec::default(),
+            format: Fourcc::Abgr8888,
             size: Size::default(),
             scale: 1,
             transform: Transform::Normal,
@@ -231,16 +246,20 @@ impl Default for MemoryRenderBufferInner {
 
 impl MemoryRenderBufferInner {
     fn new(
+        format: Fourcc,
         size: impl Into<Size<i32, Buffer>>,
         scale: i32,
         transform: Transform,
         opaque_regions: Option<Vec<Rectangle<i32, Buffer>>>,
     ) -> Self {
-        // TODO: Allow to specify the format when ImportMem
-        // has been changed to allow specifying a format
         let size = size.into();
         MemoryRenderBufferInner {
-            mem: vec![0; (size.w * 4 * size.h) as usize],
+            mem: vec![
+                0;
+                (size.w * (get_bpp(format).expect("Format with unknown bits per pixel") / 8) as i32 * size.h)
+                    as usize
+            ],
+            format,
             size,
             scale,
             transform,
@@ -253,18 +272,22 @@ impl MemoryRenderBufferInner {
 
     fn from_memory(
         mem: &[u8],
+        format: Fourcc,
         size: impl Into<Size<i32, Buffer>>,
         scale: i32,
         transform: Transform,
         opaque_regions: Option<Vec<Rectangle<i32, Buffer>>>,
     ) -> Self {
-        // TODO: Allow to specify the format when ImportMem
-        // has been changed to allow specifying a format
         let size = size.into();
-        assert_eq!(mem.len(), (size.w * 4 * size.h) as usize);
+        assert_eq!(
+            mem.len(),
+            (size.w * (get_bpp(format).expect("Format with unknown bits per pixel") / 8) as i32 * size.h)
+                as usize
+        );
 
         MemoryRenderBufferInner {
             mem: mem.to_vec(),
+            format,
             size,
             scale,
             transform,
@@ -312,7 +335,7 @@ impl MemoryRenderBufferInner {
             }
             Entry::Vacant(entry) => {
                 trace!("importing memory");
-                let tex = renderer.import_memory(&self.mem, self.size, false)?;
+                let tex = renderer.import_memory(&self.mem, self.format, self.size, false)?;
                 entry.insert(Box::new(tex));
             }
         };
@@ -352,12 +375,13 @@ impl Default for MemoryRenderBuffer {
 impl MemoryRenderBuffer {
     /// Initialize a empty [`MemoryRenderBuffer`]
     pub fn new(
+        format: Fourcc,
         size: impl Into<Size<i32, Buffer>>,
         scale: i32,
         transform: Transform,
         opaque_regions: Option<Vec<Rectangle<i32, Buffer>>>,
     ) -> Self {
-        let inner = MemoryRenderBufferInner::new(size, scale, transform, opaque_regions);
+        let inner = MemoryRenderBufferInner::new(format, size, scale, transform, opaque_regions);
         MemoryRenderBuffer {
             id: Id::new(),
             inner: Arc::new(Mutex::new(inner)),
@@ -367,12 +391,13 @@ impl MemoryRenderBuffer {
     /// Initialize a [`MemoryRenderBuffer`] from existing memory
     pub fn from_memory(
         mem: &[u8],
+        format: Fourcc,
         size: impl Into<Size<i32, Buffer>>,
         scale: i32,
         transform: Transform,
         opaque_regions: Option<Vec<Rectangle<i32, Buffer>>>,
     ) -> Self {
-        let inner = MemoryRenderBufferInner::from_memory(mem, size, scale, transform, opaque_regions);
+        let inner = MemoryRenderBufferInner::from_memory(mem, format, size, scale, transform, opaque_regions);
         MemoryRenderBuffer {
             id: Id::new(),
             inner: Arc::new(Mutex::new(inner)),

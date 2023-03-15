@@ -1035,10 +1035,13 @@ macro_rules! render_elements_internal {
 ///
 /// ```
 /// # use smithay::{
-/// #     backend::renderer::{
-/// #         element::{Element, Id, RenderElement},
-/// #         utils::CommitCounter,
-/// #         Renderer,
+/// #     backend::{
+/// #         allocator::Fourcc,
+/// #         renderer::{
+/// #             element::{Element, Id, RenderElement},
+/// #             utils::CommitCounter,
+/// #             Renderer,
+/// #         },
 /// #     },
 /// #     utils::{Buffer, Point, Physical, Rectangle, Scale, Transform},
 /// # };
@@ -1168,7 +1171,10 @@ macro_rules! render_elements_internal {
 ///
 /// ```
 /// # use smithay::{
-/// #     backend::renderer::{DebugFlags, Frame, Renderer, Texture, TextureFilter},
+/// #     backend::{
+/// #         allocator::Fourcc,
+/// #         renderer::{DebugFlags, Frame, Renderer, Texture, TextureFilter},
+/// #     },
 /// #     utils::{Buffer, Physical, Rectangle, Size, Transform},
 /// # };
 /// #
@@ -1180,6 +1186,9 @@ macro_rules! render_elements_internal {
 /// #         unimplemented!()
 /// #     }
 /// #     fn height(&self) -> u32 {
+/// #         unimplemented!()
+/// #     }
+/// #     fn format(&self) -> Option<Fourcc> {
 /// #         unimplemented!()
 /// #     }
 /// # }

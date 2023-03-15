@@ -55,6 +55,9 @@
 //! #     fn height(&self) -> u32 {
 //! #         unimplemented!()
 //! #     }
+//! #     fn format(&self) -> Option<Fourcc> {
+//! #         unimplemented!()
+//! #     }
 //! # }
 //! #
 //! # struct FakeFrame;
@@ -116,6 +119,7 @@
 //! #     fn import_memory(
 //! #         &mut self,
 //! #         _: &[u8],
+//! #         _: Fourcc,
 //! #         _: Size<i32, Buffer>,
 //! #         _: bool,
 //! #     ) -> Result<Self::TextureId, Self::Error> {
@@ -129,11 +133,17 @@
 //! #     ) -> Result<(), Self::Error> {
 //! #         unimplemented!()
 //! #     }
+//! #     fn mem_formats(&self) -> Box<dyn Iterator<Item=Fourcc>> {
+//! #         unimplemented!()
+//! #     }
 //! # }
 //! use smithay::{
-//!     backend::renderer::{
-//!         damage::DamageTrackedRenderer,
-//!         element::texture::{TextureBuffer, TextureRenderElement},
+//!     backend::{
+//!         allocator::Fourcc,
+//!         renderer::{
+//!             damage::DamageTrackedRenderer,
+//!             element::texture::{TextureBuffer, TextureRenderElement},
+//!         },
 //!     },
 //!     utils::{Point, Transform},
 //! };
@@ -148,6 +158,7 @@
 //! let texture_buffer = TextureBuffer::from_memory(
 //!     &mut renderer,
 //!     &memory,
+//!     Fourcc::Argb8888,
 //!     (WIDTH, HEIGHT),
 //!     false,
 //!     1,
@@ -189,6 +200,9 @@
 //! #     fn height(&self) -> u32 {
 //! #         unimplemented!()
 //! #     }
+//! #     fn format(&self) -> Option<Fourcc> {
+//! #         unimplemented!()
+//! #     }
 //! # }
 //! #
 //! # struct FakeFrame;
@@ -250,6 +264,7 @@
 //! #     fn import_memory(
 //! #         &mut self,
 //! #         _: &[u8],
+//! #         _: Fourcc,
 //! #         _: Size<i32, Buffer>,
 //! #         _: bool,
 //! #     ) -> Result<Self::TextureId, Self::Error> {
@@ -263,13 +278,19 @@
 //! #     ) -> Result<(), Self::Error> {
 //! #         unimplemented!()
 //! #     }
+//! #     fn mem_formats(&self) -> Box<dyn Iterator<Item=Fourcc>> {
+//! #         unimplemented!()
+//! #     }
 //! # }
 //! use std::time::{Duration, Instant};
 //!
 //! use smithay::{
-//!     backend::renderer::{
-//!         damage::DamageTrackedRenderer,
-//!         element::texture::{TextureRenderBuffer, TextureRenderElement},
+//!     backend::{
+//!         allocator::Fourcc,
+//!         renderer::{
+//!             damage::DamageTrackedRenderer,
+//!             element::texture::{TextureRenderBuffer, TextureRenderElement},
+//!         },
 //!     },
 //!     utils::{Point, Rectangle, Size, Transform},
 //! };
@@ -284,6 +305,7 @@
 //! let mut texture_render_buffer = TextureRenderBuffer::from_memory(
 //!     &mut renderer,
 //!     &memory,
+//!     Fourcc::Argb8888,
 //!     (WIDTH, HEIGHT),
 //!     false,
 //!     1,
@@ -356,9 +378,12 @@ use std::sync::{Arc, Mutex};
 use tracing::{instrument, warn};
 
 use crate::{
-    backend::renderer::{
-        utils::{DamageTracker, DamageTrackerSnapshot},
-        Frame, ImportMem, Renderer, Texture,
+    backend::{
+        allocator::Fourcc,
+        renderer::{
+            utils::{DamageTracker, DamageTrackerSnapshot},
+            Frame, ImportMem, Renderer, Texture,
+        },
     },
     utils::{Buffer, Coordinate, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
 };
@@ -396,16 +421,18 @@ impl<T> TextureBuffer<T> {
     }
 
     /// Create [`TextureBuffer`] from a chunk of memory
+    #[allow(clippy::too_many_arguments)]
     pub fn from_memory<R: Renderer<TextureId = T> + ImportMem>(
         renderer: &mut R,
         data: &[u8],
+        format: Fourcc,
         size: impl Into<Size<i32, Buffer>>,
         flipped: bool,
         scale: i32,
         transform: Transform,
         opaque_regions: Option<Vec<Rectangle<i32, Buffer>>>,
     ) -> Result<Self, <R as Renderer>::Error> {
-        let texture = renderer.import_memory(data, size.into(), flipped)?;
+        let texture = renderer.import_memory(data, format, size.into(), flipped)?;
         Ok(TextureBuffer::from_texture(
             renderer,
             texture,
@@ -413,6 +440,14 @@ impl<T> TextureBuffer<T> {
             transform,
             opaque_regions,
         ))
+    }
+
+    /// Format of the underlying texture
+    pub fn format(&self) -> Option<Fourcc>
+    where
+        T: Texture,
+    {
+        self.texture.format()
     }
 }
 
@@ -449,16 +484,18 @@ impl<T: Texture> TextureRenderBuffer<T> {
     }
 
     /// Create [`TextureRenderBuffer`] from a chunk of memory
+    #[allow(clippy::too_many_arguments)]
     pub fn from_memory<R: Renderer<TextureId = T> + ImportMem>(
         renderer: &mut R,
         data: &[u8],
+        format: Fourcc,
         size: impl Into<Size<i32, Buffer>>,
         flipped: bool,
         scale: i32,
         transform: Transform,
         opaque_regions: Option<Vec<Rectangle<i32, Buffer>>>,
     ) -> Result<Self, <R as Renderer>::Error> {
-        let texture = renderer.import_memory(data, size.into(), flipped)?;
+        let texture = renderer.import_memory(data, format, size.into(), flipped)?;
         Ok(TextureRenderBuffer::from_texture(
             renderer,
             texture,
@@ -507,6 +544,11 @@ impl<T: Texture> TextureRenderBuffer<T> {
             damage: Vec::new(),
             opaque_regions: None,
         }
+    }
+
+    /// Format of the underlying texture
+    pub fn format(&self) -> Option<Fourcc> {
+        self.texture.format()
     }
 }
 

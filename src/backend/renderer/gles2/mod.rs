@@ -22,10 +22,12 @@ use tracing::{debug, error, info, info_span, instrument, span, span::EnteredSpan
 use std::cell::RefCell;
 
 pub mod element;
+pub mod format;
 mod shaders;
 mod uniform;
 mod version;
 
+use format::*;
 pub use uniform::*;
 
 use super::{
@@ -34,7 +36,8 @@ use super::{
 };
 use crate::backend::allocator::{
     dmabuf::{Dmabuf, WeakDmabuf},
-    Format,
+    format::{get_bpp, get_opaque, get_transparent, has_alpha},
+    Format, Fourcc,
 };
 use crate::backend::egl::{
     ffi::egl::{self as ffi_egl, types::EGLImage},
@@ -49,6 +52,8 @@ use super::ImportEgl;
 use super::{ImportDmaWl, ImportMemWl};
 #[cfg(all(feature = "wayland_frontend", feature = "use_system_lib"))]
 use crate::backend::egl::{display::EGLBufferReader, Format as EGLFormat};
+#[cfg(feature = "wayland_frontend")]
+use crate::wayland::shm::shm_format_to_fourcc;
 #[cfg(feature = "wayland_frontend")]
 use wayland_server::protocol::{wl_buffer, wl_shm};
 
@@ -88,6 +93,26 @@ pub struct Gles2TexProgram(Rc<Gles2TexProgramInner>);
 struct Gles2TexProgramInner {
     variants: [Gles2TexProgramVariant; 3],
     destruction_callback_sender: Sender<CleanupResource>,
+}
+
+impl Gles2TexProgram {
+    fn variant_for_format(
+        &self,
+        format: Option<ffi::types::GLenum>,
+        has_alpha: bool,
+    ) -> &Gles2TexProgramVariant {
+        match format {
+            Some(ffi::RGBA8) | Some(ffi::RGB10_A2) | Some(ffi::RGBA16F) => {
+                if has_alpha {
+                    &self.0.variants[0]
+                } else {
+                    &self.0.variants[1]
+                }
+            }
+            None => &self.0.variants[2],
+            _ => panic!("Unknown texture type"),
+        }
+    }
 }
 
 impl Drop for Gles2TexProgramInner {
@@ -167,12 +192,15 @@ impl Gles2Texture {
     /// The renderer cannot make sure `tex` is a valid texture id.
     pub unsafe fn from_raw(
         renderer: &Gles2Renderer,
+        internal_format: Option<ffi::types::GLenum>,
+        opaque: bool,
         tex: ffi::types::GLuint,
         size: Size<i32, BufferCoord>,
     ) -> Gles2Texture {
         Gles2Texture(Rc::new(Gles2TextureInternal {
             texture: tex,
-            texture_kind: 0,
+            format: internal_format,
+            has_alpha: !opaque,
             is_external: false,
             y_inverted: false,
             size,
@@ -192,7 +220,8 @@ impl Gles2Texture {
 #[derive(Debug)]
 struct Gles2TextureInternal {
     texture: ffi::types::GLuint,
-    texture_kind: usize,
+    format: Option<ffi::types::GLenum>,
+    has_alpha: bool,
     is_external: bool,
     y_inverted: bool,
     size: Size<i32, BufferCoord>,
@@ -234,12 +263,23 @@ impl Texture for Gles2Texture {
     fn size(&self) -> Size<i32, BufferCoord> {
         self.0.size
     }
+    fn format(&self) -> Option<Fourcc> {
+        let fmt = gl_internal_format_to_fourcc(self.0.format?);
+        if self.0.has_alpha {
+            fmt
+        } else {
+            fmt.and_then(get_opaque)
+        }
+    }
 }
 
 /// Texture mapping of a GLES2 texture
 #[derive(Debug)]
 pub struct Gles2Mapping {
     pbo: ffi::types::GLuint,
+    format: ffi::types::GLenum,
+    layout: ffi::types::GLenum,
+    has_alpha: bool,
     size: Size<i32, BufferCoord>,
     mapping: AtomicPtr<nix::libc::c_void>,
     destruction_callback_sender: Sender<CleanupResource>,
@@ -255,10 +295,21 @@ impl Texture for Gles2Mapping {
     fn size(&self) -> Size<i32, BufferCoord> {
         self.size
     }
+    fn format(&self) -> Option<Fourcc> {
+        let fmt = gl_read_format_to_fourcc(self.format, self.layout);
+        if self.has_alpha {
+            fmt
+        } else {
+            fmt.and_then(get_opaque)
+        }
+    }
 }
 impl TextureMapping for Gles2Mapping {
     fn flipped(&self) -> bool {
         true
+    }
+    fn format(&self) -> Fourcc {
+        Texture::format(self).expect("Should never happen")
     }
 }
 
@@ -289,6 +340,8 @@ pub struct Gles2Renderbuffer(Rc<Gles2RenderbufferInternal>);
 #[derive(Debug)]
 struct Gles2RenderbufferInternal {
     rbo: ffi::types::GLuint,
+    format: ffi::types::GLenum,
+    has_alpha: bool,
     destruction_callback_sender: Sender<CleanupResource>,
 }
 
@@ -316,6 +369,37 @@ enum Gles2Target {
         buf: Gles2Renderbuffer,
         fbo: ffi::types::GLuint,
     },
+}
+
+impl Gles2Target {
+    fn format(&self) -> Option<(ffi::types::GLenum, bool)> {
+        match self {
+            Gles2Target::Image { dmabuf, .. } => {
+                let format = crate::backend::allocator::Buffer::format(dmabuf).code;
+                let has_alpha = has_alpha(format);
+                let (format, _, _) = fourcc_to_gl_formats(if has_alpha {
+                    format
+                } else {
+                    get_transparent(format)?
+                })?;
+
+                Some((format, has_alpha))
+            }
+            Gles2Target::Surface(surf) => {
+                let format = surf.pixel_format();
+                let format = match (format.color_bits, format.alpha_bits) {
+                    (24, 8) => ffi::RGB8,
+                    (30, 2) => ffi::RGB10_A2,
+                    (48, 16) => ffi::RGB16F,
+                    _ => return None,
+                };
+
+                Some((format, true))
+            }
+            Gles2Target::Texture { texture, .. } => Some((texture.0.format?, texture.0.has_alpha)),
+            Gles2Target::Renderbuffer { buf, .. } => Some((buf.0.format, buf.0.has_alpha)),
+        }
+    }
 }
 
 impl Drop for Gles2Target {
@@ -456,10 +540,19 @@ pub enum Gles2Error {
     ///The given dmabuf could not be converted to an EGLImage for framebuffer use
     #[error("Failed to convert between dmabuf and EGLImage")]
     BindBufferEGLError(#[source] crate::backend::egl::Error),
+    /// The given buffer has an unknown pixel format
+    #[error("Unknown pixel format")]
+    UnknownPixelFormat,
     /// The given buffer has an unsupported pixel format
     #[error("Unsupported pixel format: {0:?}")]
+    UnsupportedPixelFormat(Fourcc),
+    /// The given buffer has an unknown pixel layout
+    #[error("Unsupported pixel layout")]
+    UnsupportedPixelLayout,
+    /// The given wl buffer has an unsupported pixel format
+    #[error("Unsupported wl_shm format: {0:?}")]
     #[cfg(feature = "wayland_frontend")]
-    UnsupportedPixelFormat(wl_shm::Format),
+    UnsupportedWlPixelFormat(wl_shm::Format),
     /// The given buffer was not accessible
     #[error("Error accessing the buffer ({0:?})")]
     #[cfg(feature = "wayland_frontend")]
@@ -510,7 +603,10 @@ impl From<Gles2Error> for SwapBuffersError {
             Gles2Error::ContextActivationError(err) => err.into(),
             x @ Gles2Error::FramebufferBindingError
             | x @ Gles2Error::BindBufferEGLError(_)
+            | x @ Gles2Error::UnknownPixelFormat
             | x @ Gles2Error::UnsupportedPixelFormat(_)
+            | x @ Gles2Error::UnsupportedWlPixelFormat(_)
+            | x @ Gles2Error::UnsupportedPixelLayout
             | x @ Gles2Error::BufferAccessError(_)
             | x @ Gles2Error::MappingError
             | x @ Gles2Error::UnexpectedSize
@@ -534,6 +630,9 @@ impl From<Gles2Error> for SwapBuffersError {
             Gles2Error::ContextActivationError(err) => err.into(),
             x @ Gles2Error::FramebufferBindingError
             | x @ Gles2Error::MappingError
+            | x @ Gles2Error::UnknownPixelFormat
+            | x @ Gles2Error::UnsupportedPixelFormat(_)
+            | x @ Gles2Error::UnsupportedPixelLayout
             | x @ Gles2Error::UnexpectedSize
             | x @ Gles2Error::BlitError
             | x @ Gles2Error::CreateShaderObject
@@ -664,11 +763,11 @@ unsafe fn texture_program(
     additional_uniforms: &[UniformName<'_>],
     destruction_callback_sender: Sender<CleanupResource>,
 ) -> Result<Gles2TexProgram, Gles2Error> {
-    let create_variant = |variant: Option<&str>| -> Result<Gles2TexProgramVariant, Gles2Error> {
-        let src = match variant {
-            None => Cow::Borrowed(frag),
-            Some(define) => Cow::Owned(format!("#define {}\n{}", define, frag)),
-        };
+    let create_variant = |defines: &[&str]| -> Result<Gles2TexProgramVariant, Gles2Error> {
+        let mut src = String::from(frag);
+        for define in defines {
+            src = format!("#define {}\n{}", define, frag);
+        }
         let shader = format!("#version 100\n{}", src);
         let program = unsafe { link_program(gl, shaders::VERTEX_SHADER, &shader)? };
 
@@ -745,9 +844,9 @@ unsafe fn texture_program(
 
     Ok(Gles2TexProgram(Rc::new(Gles2TexProgramInner {
         variants: [
-            create_variant(None)?,
-            create_variant(Some(shaders::XBGR))?,
-            create_variant(Some(shaders::EXTERNAL))?,
+            create_variant(&[])?,
+            create_variant(&[shaders::NO_ALPHA])?,
+            create_variant(&[shaders::EXTERNAL])?,
         ],
         destruction_callback_sender,
     })))
@@ -1002,21 +1101,37 @@ impl ImportMemWl for Gles2Renderer {
             let width = data.width as i32;
             let height = data.height as i32;
             let stride = data.stride as i32;
+            let fourcc =
+                shm_format_to_fourcc(data.format).ok_or(Gles2Error::UnsupportedWlPixelFormat(data.format))?;
+
+            if self.gl_version.major >= 3 {
+                if !SUPPORTED_MEM_FORMATS_3.contains(&fourcc) {
+                    return Err(Gles2Error::UnsupportedWlPixelFormat(data.format));
+                }
+            } else if !SUPPORTED_MEM_FORMATS_2.contains(&fourcc) {
+                return Err(Gles2Error::UnsupportedWlPixelFormat(data.format));
+            }
+
+            let has_alpha = has_alpha(fourcc);
+            let (mut internal_format, read_format, type_) = fourcc_to_gl_formats(if has_alpha {
+                fourcc
+            } else {
+                get_transparent(fourcc).ok_or(Gles2Error::UnsupportedWlPixelFormat(data.format))?
+            })
+            .ok_or(Gles2Error::UnsupportedWlPixelFormat(data.format))?;
+            if self.gl_version.major == 2 {
+                // es 2.0 doesn't define sized variants
+                internal_format = match internal_format {
+                    ffi::RGBA8 => ffi::RGBA,
+                    ffi::RGB8 => ffi::RGB,
+                    _ => unreachable!(),
+                };
+            }
 
             // number of bytes per pixel
-            // TODO: compute from data.format
-            let pixelsize = 4i32;
-
+            let pixelsize = gl_bpp(read_format, type_).expect("We check the format before") / 8;
             // ensure consistency, the SHM handler of smithay should ensure this
-            assert!((offset + (height - 1) * stride + width * pixelsize) as usize <= len);
-
-            let (gl_format, shader_idx) = match data.format {
-                wl_shm::Format::Abgr8888 => (ffi::RGBA, 0),
-                wl_shm::Format::Xbgr8888 => (ffi::RGBA, 1),
-                wl_shm::Format::Argb8888 => (ffi::BGRA_EXT, 0),
-                wl_shm::Format::Xrgb8888 => (ffi::BGRA_EXT, 1),
-                format => return Err(Gles2Error::UnsupportedPixelFormat(format)),
-            };
+            assert!((offset + (height - 1) * stride + width * pixelsize as i32) as usize <= len);
 
             let mut upload_full = false;
 
@@ -1043,7 +1158,8 @@ impl ImportMemWl for Gles2Renderer {
                         upload_full = true;
                         let new = Rc::new(Gles2TextureInternal {
                             texture: tex,
-                            texture_kind: shader_idx,
+                            format: Some(internal_format),
+                            has_alpha,
                             is_external: false,
                             y_inverted: false,
                             size: (width, height).into(),
@@ -1069,19 +1185,20 @@ impl ImportMemWl for Gles2Renderer {
                     .TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
                 self.gl
                     .TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
-                self.gl.PixelStorei(ffi::UNPACK_ROW_LENGTH, stride / pixelsize);
+                self.gl
+                    .PixelStorei(ffi::UNPACK_ROW_LENGTH, stride / pixelsize as i32);
 
                 if upload_full || damage.is_empty() {
                     trace!("Uploading shm texture");
                     self.gl.TexImage2D(
                         ffi::TEXTURE_2D,
                         0,
-                        gl_format as i32,
+                        internal_format as i32,
                         width,
                         height,
                         0,
-                        gl_format,
-                        ffi::UNSIGNED_BYTE as u32,
+                        read_format,
+                        type_,
                         ptr.offset(offset as isize) as *const _,
                     );
                 } else {
@@ -1096,8 +1213,8 @@ impl ImportMemWl for Gles2Renderer {
                             region.loc.y,
                             region.size.w,
                             region.size.h,
-                            gl_format,
-                            ffi::UNSIGNED_BYTE as u32,
+                            read_format,
+                            type_,
                             ptr.offset(offset as isize) as *const _,
                         );
                         self.gl.PixelStorei(ffi::UNPACK_SKIP_PIXELS, 0);
@@ -1113,29 +1230,65 @@ impl ImportMemWl for Gles2Renderer {
         })
         .map_err(Gles2Error::BufferAccessError)?
     }
-
-    fn shm_formats(&self) -> &[wl_shm::Format] {
-        &[
-            wl_shm::Format::Abgr8888,
-            wl_shm::Format::Xbgr8888,
-            wl_shm::Format::Argb8888,
-            wl_shm::Format::Xrgb8888,
-        ]
-    }
 }
+
+const SUPPORTED_MEM_FORMATS_2: &[Fourcc] = &[
+    Fourcc::Abgr8888,
+    Fourcc::Xbgr8888,
+    Fourcc::Argb8888,
+    Fourcc::Xrgb8888,
+];
+const SUPPORTED_MEM_FORMATS_3: &[Fourcc] = &[
+    Fourcc::Abgr8888,
+    Fourcc::Xbgr8888,
+    Fourcc::Argb8888,
+    Fourcc::Xrgb8888,
+    Fourcc::Abgr2101010,
+    Fourcc::Xbgr2101010,
+    Fourcc::Abgr16161616f,
+    Fourcc::Xbgr16161616f,
+];
 
 impl ImportMem for Gles2Renderer {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     fn import_memory(
         &mut self,
         data: &[u8],
+        format: Fourcc,
         size: Size<i32, BufferCoord>,
         flipped: bool,
     ) -> Result<Gles2Texture, Gles2Error> {
         self.make_current()?;
 
-        if data.len() < (size.w * size.h * 4) as usize {
+        if data.len()
+            < (size.w * size.h) as usize
+                * (get_bpp(format).ok_or(Gles2Error::UnsupportedPixelFormat(format))? / 8)
+        {
             return Err(Gles2Error::UnexpectedSize);
+        }
+
+        if self.gl_version.major >= 3 {
+            if !SUPPORTED_MEM_FORMATS_3.contains(&format) {
+                return Err(Gles2Error::UnsupportedPixelFormat(format));
+            }
+        } else if !SUPPORTED_MEM_FORMATS_2.contains(&format) {
+            return Err(Gles2Error::UnsupportedPixelFormat(format));
+        }
+
+        let has_alpha = has_alpha(format);
+        let (mut internal, format, layout) = fourcc_to_gl_formats(if has_alpha {
+            format
+        } else {
+            get_transparent(format).expect("We check the format before")
+        })
+        .expect("We check the format before");
+        if self.gl_version.major == 2 {
+            // es 2.0 doesn't define sized variants
+            internal = match internal {
+                ffi::RGBA8 => ffi::RGBA,
+                ffi::RGB8 => ffi::RGB,
+                _ => unreachable!(),
+            };
         }
 
         let texture = Gles2Texture(Rc::new({
@@ -1150,12 +1303,12 @@ impl ImportMem for Gles2Renderer {
                 self.gl.TexImage2D(
                     ffi::TEXTURE_2D,
                     0,
-                    ffi::RGBA as i32,
+                    internal as i32,
                     size.w,
                     size.h,
                     0,
-                    ffi::RGBA,
-                    ffi::UNSIGNED_BYTE as u32,
+                    format,
+                    layout as u32,
                     data.as_ptr() as *const _,
                 );
                 self.gl.BindTexture(ffi::TEXTURE_2D, 0);
@@ -1163,7 +1316,8 @@ impl ImportMem for Gles2Renderer {
             // new texture, upload in full
             Gles2TextureInternal {
                 texture: tex,
-                texture_kind: 0,
+                format: Some(internal),
+                has_alpha,
                 is_external: false,
                 y_inverted: flipped,
                 size,
@@ -1184,7 +1338,19 @@ impl ImportMem for Gles2Renderer {
     ) -> Result<(), <Self as Renderer>::Error> {
         self.make_current()?;
 
-        if data.len() < (region.size.w * region.size.h * 4) as usize {
+        if texture.0.format.is_none() {
+            return Err(Gles2Error::UnknownPixelFormat);
+        }
+        if texture.0.is_external {
+            return Err(Gles2Error::UnsupportedPixelLayout);
+        }
+        let (read_format, type_) = gl_read_for_internal(texture.0.format.expect("We check that before"))
+            .ok_or(Gles2Error::UnknownPixelFormat)?;
+
+        if data.len()
+            < (region.size.w * region.size.h) as usize
+                * (gl_bpp(read_format, type_).ok_or(Gles2Error::UnknownPixelFormat)? / 8)
+        {
             return Err(Gles2Error::UnexpectedSize);
         }
 
@@ -1204,8 +1370,8 @@ impl ImportMem for Gles2Renderer {
                 region.loc.y,
                 region.size.w,
                 region.size.h,
-                ffi::RGBA,
-                ffi::UNSIGNED_BYTE as u32,
+                read_format as u32,
+                type_ as u32,
                 data.as_ptr() as *const _,
             );
             self.gl.PixelStorei(ffi::UNPACK_ROW_LENGTH, 0);
@@ -1215,6 +1381,14 @@ impl ImportMem for Gles2Renderer {
         }
 
         Ok(())
+    }
+
+    fn mem_formats(&self) -> Box<dyn Iterator<Item = Fourcc>> {
+        if self.gl_version.major >= 3 {
+            Box::new(SUPPORTED_MEM_FORMATS_3.iter().copied())
+        } else {
+            Box::new(SUPPORTED_MEM_FORMATS_2.iter().copied())
+        }
     }
 }
 
@@ -1275,12 +1449,13 @@ impl ImportEgl for Gles2Renderer {
 
         let texture = Gles2Texture(Rc::new(Gles2TextureInternal {
             texture: tex,
-            texture_kind: match egl.format {
-                EGLFormat::RGB => 1,
-                EGLFormat::RGBA => 0,
-                EGLFormat::External => 2,
+            format: match egl.format {
+                EGLFormat::RGB => Some(ffi::RGB8),
+                EGLFormat::RGBA => Some(ffi::RGBA8),
+                EGLFormat::External => None,
                 _ => unreachable!("EGLBuffer currenly does not expose multi-planar buffers to us"),
             },
+            has_alpha: !matches!(egl.format, EGLFormat::RGB),
             is_external: egl.format == EGLFormat::External,
             y_inverted: egl.y_inverted,
             size: egl.size,
@@ -1314,9 +1489,11 @@ impl ImportDma for Gles2Renderer {
                 .map_err(Gles2Error::BindBufferEGLError)?;
 
             let tex = self.import_egl_image(image, is_external, None)?;
+            let format = fourcc_to_gl_formats(buffer.format().code).map(|(internal, _, _)| internal);
             let texture = Gles2Texture(Rc::new(Gles2TextureInternal {
                 texture: tex,
-                texture_kind: if is_external { 2 } else { 0 },
+                format,
+                has_alpha: has_alpha(buffer.format().code),
                 is_external,
                 y_inverted: buffer.y_inverted(),
                 size: buffer.size(),
@@ -1328,8 +1505,15 @@ impl ImportDma for Gles2Renderer {
         })
     }
 
-    fn dmabuf_formats<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Format> + 'a> {
-        Box::new(self.egl.dmabuf_texture_formats().iter())
+    fn dmabuf_formats(&self) -> Box<dyn Iterator<Item = Format>> {
+        Box::new(
+            self.egl
+                .dmabuf_texture_formats()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
     }
 }
 
@@ -1396,11 +1580,23 @@ impl ExportMem for Gles2Renderer {
         region: Rectangle<i32, BufferCoord>,
     ) -> Result<Self::TextureMapping, Self::Error> {
         self.make_current()?;
+
+        let (internal, has_alpha) = self
+            .target
+            .as_ref()
+            .ok_or(Gles2Error::UnknownPixelFormat)?
+            .format()
+            .ok_or(Gles2Error::UnknownPixelFormat)?;
+        let (format, layout) = gl_read_for_internal(internal).ok_or(Gles2Error::UnknownPixelFormat)?;
+
         let mut pbo = 0;
         unsafe {
             self.gl.GenBuffers(1, &mut pbo);
             self.gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, pbo);
-            let size = (region.size.w * region.size.h * 4) as isize;
+            let size = (region.size.w
+                * region.size.h
+                * (gl_bpp(format, layout).ok_or(Gles2Error::UnsupportedPixelLayout)? / 8) as i32)
+                as isize;
             self.gl
                 .BufferData(ffi::PIXEL_PACK_BUFFER, size, ptr::null(), ffi::STREAM_READ);
             self.gl.ReadBuffer(ffi::COLOR_ATTACHMENT0);
@@ -1409,8 +1605,8 @@ impl ExportMem for Gles2Renderer {
                 region.loc.y,
                 region.size.w,
                 region.size.h,
-                ffi::RGBA,
-                ffi::UNSIGNED_BYTE,
+                format,
+                layout,
                 ptr::null_mut(),
             );
             self.gl.ReadBuffer(ffi::NONE);
@@ -1418,6 +1614,9 @@ impl ExportMem for Gles2Renderer {
         }
         Ok(Gles2Mapping {
             pbo,
+            format,
+            layout,
+            has_alpha,
             size: region.size,
             mapping: AtomicPtr::new(ptr::null_mut()),
             destruction_callback_sender: self.destruction_callback_sender.clone(),
@@ -1434,12 +1633,18 @@ impl ExportMem for Gles2Renderer {
         let old_target = self.target.take();
         self.bind(texture.clone())?;
 
+        let (format, layout) = gl_read_for_internal(texture.0.format.ok_or(Gles2Error::UnknownPixelFormat)?)
+            .ok_or(Gles2Error::UnknownPixelFormat)?;
+
         unsafe {
             self.gl.GenBuffers(1, &mut pbo);
             self.gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, pbo);
             self.gl.BufferData(
                 ffi::PIXEL_PACK_BUFFER,
-                (region.size.w * region.size.h * 4) as isize,
+                (region.size.w
+                    * region.size.h
+                    * (gl_bpp(format, layout).expect("We check the format before") / 8) as i32)
+                    as isize,
                 ptr::null(),
                 ffi::STREAM_READ,
             );
@@ -1449,8 +1654,8 @@ impl ExportMem for Gles2Renderer {
                 region.loc.y,
                 region.size.w,
                 region.size.h,
-                ffi::RGBA,
-                ffi::UNSIGNED_BYTE,
+                format,
+                layout,
                 ptr::null_mut(),
             );
             self.gl.ReadBuffer(ffi::NONE);
@@ -1464,6 +1669,9 @@ impl ExportMem for Gles2Renderer {
 
         Ok(Gles2Mapping {
             pbo,
+            format,
+            layout,
+            has_alpha: texture.0.has_alpha,
             size: region.size,
             mapping: AtomicPtr::new(ptr::null_mut()),
             destruction_callback_sender: self.destruction_callback_sender.clone(),
@@ -1778,8 +1986,21 @@ impl Bind<Gles2Texture> for Gles2Renderer {
 
 impl Offscreen<Gles2Texture> for Gles2Renderer {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
-    fn create_buffer(&mut self, size: Size<i32, BufferCoord>) -> Result<Gles2Texture, Gles2Error> {
+    fn create_buffer(
+        &mut self,
+        format: Fourcc,
+        size: Size<i32, BufferCoord>,
+    ) -> Result<Gles2Texture, Gles2Error> {
         self.make_current()?;
+
+        let has_alpha = has_alpha(format);
+        let (internal, format, layout) = fourcc_to_gl_formats(if has_alpha {
+            format
+        } else {
+            get_transparent(format).ok_or(Gles2Error::UnsupportedPixelFormat(format))?
+        })
+        .ok_or(Gles2Error::UnsupportedPixelFormat(format))?;
+
         let tex = unsafe {
             let mut tex = 0;
             self.gl.GenTextures(1, &mut tex);
@@ -1787,18 +2008,18 @@ impl Offscreen<Gles2Texture> for Gles2Renderer {
             self.gl.TexImage2D(
                 ffi::TEXTURE_2D,
                 0,
-                ffi::RGBA as i32,
+                internal as i32,
                 size.w,
                 size.h,
                 0,
-                ffi::RGBA,
-                ffi::UNSIGNED_BYTE,
+                format,
+                layout,
                 std::ptr::null(),
             );
             tex
         };
 
-        Ok(unsafe { Gles2Texture::from_raw(self, tex, size) })
+        Ok(unsafe { Gles2Texture::from_raw(self, Some(internal), has_alpha, tex, size) })
     }
 }
 
@@ -1841,18 +2062,33 @@ impl Bind<Gles2Renderbuffer> for Gles2Renderer {
 
 impl Offscreen<Gles2Renderbuffer> for Gles2Renderer {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
-    fn create_buffer(&mut self, size: Size<i32, BufferCoord>) -> Result<Gles2Renderbuffer, Gles2Error> {
+    fn create_buffer(
+        &mut self,
+        format: Fourcc,
+        size: Size<i32, BufferCoord>,
+    ) -> Result<Gles2Renderbuffer, Gles2Error> {
         self.make_current()?;
+
+        let has_alpha = has_alpha(format);
+        let (internal, _, _) = fourcc_to_gl_formats(if has_alpha {
+            format
+        } else {
+            get_transparent(format).ok_or(Gles2Error::UnsupportedPixelFormat(format))?
+        })
+        .ok_or(Gles2Error::UnsupportedPixelFormat(format))?;
+
         unsafe {
             let mut rbo = 0;
             self.gl.GenRenderbuffers(1, &mut rbo);
             self.gl.BindRenderbuffer(ffi::RENDERBUFFER, rbo);
             self.gl
-                .RenderbufferStorage(ffi::RENDERBUFFER, ffi::RGBA8, size.w, size.h);
+                .RenderbufferStorage(ffi::RENDERBUFFER, internal, size.w, size.h);
             self.gl.BindRenderbuffer(ffi::RENDERBUFFER, 0);
 
             Ok(Gles2Renderbuffer(Rc::new(Gles2RenderbufferInternal {
                 rbo,
+                format: internal,
+                has_alpha,
                 destruction_callback_sender: self.destruction_callback_sender.clone(),
             })))
         }
@@ -2722,7 +2958,10 @@ impl<'frame> Gles2Frame<'frame> {
             .map(|p| (p, additional_uniforms))
             .or_else(|| self.tex_program_override.as_ref().map(|(p, a)| (p, &**a)))
             .unwrap_or((&self.renderer.tex_program, &[]));
-        let program_variant = &tex_program.0.variants[tex.0.texture_kind];
+        let program_variant = tex_program.variant_for_format(
+            if !tex.0.is_external { tex.0.format } else { None },
+            tex.0.has_alpha,
+        );
         let program = if self.renderer.debug_flags.is_empty() {
             &program_variant.normal
         } else {
