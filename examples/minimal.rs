@@ -2,6 +2,7 @@ use std::{os::unix::io::OwnedFd, sync::Arc};
 
 use smithay::{
     backend::{
+        egl::context::PixelFormatRequirements,
         input::{InputEvent, KeyboardKeyEvent},
         renderer::{
             element::surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
@@ -143,7 +144,7 @@ pub fn run_winit() -> Result<(), Box<dyn std::error::Error>> {
     let listener = ListeningSocket::bind("wayland-5").unwrap();
     let mut clients = Vec::new();
 
-    let (mut backend, mut winit) = winit::init::<Gles2Renderer>()?;
+    let (mut backend, mut winit) = winit::init::<Gles2Renderer>(PixelFormatRequirements::_8_bit())?;
 
     let start_time = std::time::Instant::now();
 

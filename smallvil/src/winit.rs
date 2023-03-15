@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use smithay::{
     backend::{
+        egl::context::PixelFormatRequirements,
         renderer::{
             damage::DamageTrackedRenderer, element::surface::WaylandSurfaceRenderElement,
             gles2::Gles2Renderer,
@@ -25,7 +26,7 @@ pub fn init_winit(
     let display = &mut data.display;
     let state = &mut data.state;
 
-    let (mut backend, mut winit) = winit::init()?;
+    let (mut backend, mut winit) = winit::init(PixelFormatRequirements::_8_bit())?;
 
     let mode = Mode {
         size: backend.window_size().physical_size,

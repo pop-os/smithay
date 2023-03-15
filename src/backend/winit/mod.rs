@@ -24,7 +24,9 @@ mod input;
 use crate::{
     backend::{
         egl::{
-            context::GlAttributes, display::EGLDisplay, native, EGLContext, EGLSurface, Error as EGLError,
+            context::{GlAttributes, PixelFormatRequirements},
+            display::EGLDisplay,
+            native, EGLContext, EGLSurface, Error as EGLError,
         },
         input::InputEvent,
         renderer::{
@@ -122,7 +124,7 @@ pub struct WinitEventLoop {
 /// Create a new [`WinitGraphicsBackend`], which implements the
 /// [`Renderer`](crate::backend::renderer::Renderer) trait and a corresponding
 /// [`WinitEventLoop`].
-pub fn init<R>() -> Result<(WinitGraphicsBackend<R>, WinitEventLoop), Error>
+pub fn init<R>(format: PixelFormatRequirements) -> Result<(WinitGraphicsBackend<R>, WinitEventLoop), Error>
 where
     R: From<Gles2Renderer> + Bind<Rc<EGLSurface>>,
     crate::backend::SwapBuffersError: From<<R as Renderer>::Error>,
@@ -132,6 +134,7 @@ where
             .with_inner_size(LogicalSize::new(1280.0, 800.0))
             .with_title("Smithay")
             .with_visible(true),
+        format,
     )
 }
 
@@ -140,6 +143,7 @@ where
 /// struct and a corresponding [`WinitEventLoop`].
 pub fn init_from_builder<R>(
     builder: WindowBuilder,
+    format: PixelFormatRequirements,
 ) -> Result<(WinitGraphicsBackend<R>, WinitEventLoop), Error>
 where
     R: From<Gles2Renderer> + Bind<Rc<EGLSurface>>,
@@ -153,6 +157,7 @@ where
             debug: cfg!(debug_assertions),
             vsync: true,
         },
+        format,
     )
 }
 
@@ -163,6 +168,7 @@ where
 pub fn init_from_builder_with_gl_attr<R>(
     builder: WindowBuilder,
     attributes: GlAttributes,
+    format: PixelFormatRequirements,
 ) -> Result<(WinitGraphicsBackend<R>, WinitEventLoop), Error>
 where
     R: From<Gles2Renderer> + Bind<Rc<EGLSurface>>,
@@ -178,10 +184,9 @@ where
     span.record("window", Into::<u64>::into(winit_window.id()));
     debug!("Window created");
 
-    let reqs = Default::default();
     let (display, context, surface, is_x11) = {
         let display = EGLDisplay::new(winit_window.clone())?;
-        let context = EGLContext::new_with_config(&display, attributes, reqs)?;
+        let context = EGLContext::new_with_config(&display, attributes, format)?;
 
         let (surface, is_x11) = if let Some(wl_surface) = winit_window.wayland_surface() {
             debug!("Winit backend: Wayland");

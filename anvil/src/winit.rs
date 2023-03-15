@@ -9,10 +9,11 @@ use std::{
 use smithay::backend::renderer::ImportEgl;
 #[cfg(feature = "debug")]
 use smithay::backend::renderer::ImportMem;
+
 use smithay::{
     backend::{
         allocator::dmabuf::Dmabuf,
-        egl::EGLDevice,
+        egl::{context::PixelFormatRequirements, EGLDevice},
         renderer::{
             damage::{DamageTrackedRenderer, DamageTrackedRendererError},
             element::AsRenderElements,
@@ -86,7 +87,9 @@ pub fn run_winit() {
     let mut display = Display::new().unwrap();
 
     #[cfg_attr(not(feature = "egl"), allow(unused_mut))]
-    let (mut backend, mut winit) = match winit::init::<Gles2Renderer>() {
+    let (mut backend, mut winit) = match winit::init::<Gles2Renderer>(PixelFormatRequirements::_10_bit())
+        .or_else(|_| winit::init::<Gles2Renderer>(PixelFormatRequirements::_8_bit()))
+    {
         Ok(ret) => ret,
         Err(err) => {
             error!("Failed to initialize Winit backend: {}", err);
