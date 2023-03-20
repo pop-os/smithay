@@ -63,6 +63,7 @@ impl XdgShellHandler for App {
 }
 
 impl DataDeviceHandler for App {
+    type SelectionUserData = ();
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
     }
