@@ -409,6 +409,12 @@ impl<D: SeatHandler + 'static> PointerHandle<D> {
         self.inner.lock().unwrap().location
     }
 
+    /// Access the [`Serial`] of the last `pointer_enter` event.
+    #[cfg(feature = "wayland_frontend")]
+    pub fn last_enter(&self) -> Option<Serial> {
+        self.last_enter.lock().unwrap().clone()
+    }
+
     fn get_seat(&self, data: &mut D) -> Seat<D> {
         let seat_state = data.seat_state();
         seat_state
