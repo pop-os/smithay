@@ -64,7 +64,7 @@ mod lock;
 mod surface;
 
 pub use lock::SessionLockState;
-pub use surface::{ExtLockSurfaceUserData, LockSurface};
+pub use surface::{ExtLockSurfaceUserData, LockSurface, LockSurfaceState};
 
 const MANAGER_VERSION: u32 = 1;
 
@@ -206,6 +206,11 @@ impl SessionLocker {
             lock: Some(lock),
             lock_status,
         }
+    }
+
+    /// Get the underlying [`ExtSessionLockV1`]
+    pub fn ext_session_lock(&self) -> &ExtSessionLockV1 {
+        self.lock.as_ref().unwrap()
     }
 
     /// Notify the client that the session lock was successful.
