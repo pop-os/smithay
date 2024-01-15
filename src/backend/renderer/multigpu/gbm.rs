@@ -114,7 +114,7 @@ impl<R> GbmGlesBackend<R> {
         node: DrmNode,
         gbm: GbmDevice<T>,
     ) -> Result<(), EGLError> {
-        self.devices.insert(node, EGLDisplay::new(gbm)?);
+        self.devices.insert(node, unsafe { EGLDisplay::new(gbm)? });
         Ok(())
     }
 

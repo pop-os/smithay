@@ -24,6 +24,8 @@ use winit::window::Window as WinitWindow;
 #[cfg(feature = "backend_gbm")]
 use gbm::{AsRaw, Device as GbmDevice};
 
+use std::hash::{Hash, Hasher};
+
 /// Create a `EGLPlatform<'a>` for the provided platform.
 ///
 /// # Arguments
@@ -78,6 +80,14 @@ pub struct EGLPlatform<'a> {
     /// Attributes used to call [`eglGetPlatformDisplayEXT`](https://www.khronos.org/registry/EGL/extensions/EXT/EGL_EXT_platform_base.txt)
     pub attrib_list: Vec<ffi::EGLint>,
     _phantom: PhantomData<&'a c_void>,
+}
+
+impl<'a> Hash for EGLPlatform<'a> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.platform.hash(state);
+        self.native_display.hash(state);
+        self.attrib_list.hash(state);
+    }
 }
 
 impl<'a> EGLPlatform<'a> {

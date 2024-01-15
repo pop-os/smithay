@@ -1,13 +1,16 @@
 //! Type safe native types for safe egl initialisation
 
 use std::ffi::{c_int, CStr};
+use std::hash::{Hash, Hasher};
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::Arc;
-#[cfg(all(feature = "wayland_frontend", feature = "use_system_lib"))]
 use std::sync::{Mutex, Weak};
 use std::{
-    collections::HashSet,
+    collections::{
+        hash_map::{DefaultHasher, Entry},
+        HashMap, HashSet,
+    },
     os::unix::io::{AsRawFd, FromRawFd, OwnedFd},
 };
 
@@ -39,6 +42,9 @@ use tracing::{debug, error, info, info_span, instrument, trace, warn};
 lazy_static::lazy_static! {
     pub(crate) static ref BUFFER_READER: Mutex<Option<WeakBufferReader>> = Mutex::new(None);
 }
+lazy_static::lazy_static! {
+    pub(crate) static ref DISPLAYS: Mutex<HashMap<u64, Weak<EGLDisplayHandle>>> = Mutex::new(HashMap::new());
+}
 
 /// Wrapper around [`ffi::EGLDisplay`](ffi::egl::types::EGLDisplay) to ensure display is only destroyed
 /// once all resources bound to it have been dropped.
@@ -46,6 +52,7 @@ lazy_static::lazy_static! {
 pub struct EGLDisplayHandle {
     /// ffi EGLDisplay ptr
     pub handle: ffi::egl::types::EGLDisplay,
+    should_terminate: bool,
     _native: Box<dyn std::any::Any + 'static>,
 }
 // EGLDisplay has an internal Mutex
@@ -62,9 +69,11 @@ impl Deref for EGLDisplayHandle {
 
 impl Drop for EGLDisplayHandle {
     fn drop(&mut self) {
-        unsafe {
-            // ignore errors on drop
-            ffi::egl::Terminate(self.handle);
+        if self.should_terminate {
+            unsafe {
+                // ignore errors on drop
+                ffi::egl::Terminate(self.handle);
+            }
         }
     }
 }
@@ -84,9 +93,9 @@ pub struct EGLDisplay {
 }
 
 unsafe fn select_platform_display<N: EGLNativeDisplay + 'static>(
-    native: &N,
+    native: N,
     dp_extensions: &[String],
-) -> Result<(*const c_void, &'static str), Error> {
+) -> Result<(Arc<EGLDisplayHandle>, &'static str), Error> {
     for platform in native.supported_platforms() {
         debug!("Trying EGL platform: {}", platform.platform_name);
 
@@ -103,35 +112,58 @@ unsafe fn select_platform_display<N: EGLNativeDisplay + 'static>(
             continue;
         }
 
-        let display = wrap_egl_call_ptr(|| {
-            ffi::egl::GetPlatformDisplayEXT(
-                platform.platform,
-                platform.native_display,
-                platform.attrib_list.as_ptr(),
-            )
-        })
-        .map_err(Error::DisplayCreationError);
+        let mut hasher = DefaultHasher::new();
+        platform.hash(&mut hasher);
+        let hash = hasher.finish();
 
-        let display = match display {
-            Ok(display) => {
-                if display == ffi::egl::NO_DISPLAY {
-                    info!("Skipping platform because the display is not supported");
-                    continue;
-                }
+        let mut displays = DISPLAYS.lock().unwrap();
+        displays.retain(|_, disp| disp.upgrade().is_some());
 
-                display
+        let name = platform.platform_name;
+        let handle = match displays.entry(hash) {
+            Entry::Vacant(e) => {
+                let display = wrap_egl_call_ptr(|| {
+                    ffi::egl::GetPlatformDisplayEXT(
+                        platform.platform,
+                        platform.native_display,
+                        platform.attrib_list.as_ptr(),
+                    )
+                })
+                .map_err(Error::DisplayCreationError);
+
+                let display = match display {
+                    Ok(display) => {
+                        if display == ffi::egl::NO_DISPLAY {
+                            info!("Skipping platform because the display is not supported");
+                            continue;
+                        }
+
+                        display
+                    }
+                    Err(err) => {
+                        info!(
+                            "Skipping platform because of an display creation error: {:?}",
+                            err
+                        );
+                        continue;
+                    }
+                };
+
+                let handle = Arc::new(EGLDisplayHandle {
+                    handle: display,
+                    should_terminate: true,
+                    _native: Box::new(native) as Box<dyn std::any::Any + 'static>,
+                });
+
+                e.insert(Arc::downgrade(&handle));
+
+                handle
             }
-            Err(err) => {
-                info!(
-                    "Skipping platform because of an display creation error: {:?}",
-                    err
-                );
-                continue;
-            }
+            Entry::Occupied(e) => e.get().upgrade().unwrap(),
         };
 
-        info!("Successfully selected EGL platform: {}", platform.platform_name);
-        return Ok((display, platform.platform_name));
+        info!("Successfully selected EGL platform: {}", name);
+        return Ok((handle, name));
     }
 
     error!("Unable to find suitable EGL platform");
@@ -139,8 +171,23 @@ unsafe fn select_platform_display<N: EGLNativeDisplay + 'static>(
 }
 
 impl EGLDisplay {
-    /// Create a new [`EGLDisplay`] from a given [`EGLNativeDisplay`]
-    pub fn new<N>(native: N) -> Result<EGLDisplay, Error>
+    /// Create a new [`EGLDisplay`] from a given [`EGLNativeDisplay`].
+    ///
+    /// # Safety
+    ///
+    /// smithay internally tracks EGLDisplay instances as
+    /// calls with the same parameters to `eglGetPlatformDisplay` will return
+    /// references to the same underlying display.
+    ///
+    /// You don't have to worry about this, when using just smithay,
+    /// but if other code calls `eglGetPlatformDisplay` it is possible to close the resulting
+    /// EGLDisplay via `eglTerminate` without invalidating smithay's instances.
+    ///
+    /// If you are using other code creating `EGLDisplay`s, don't use this method,
+    /// but use the external code to create the display and use `EGLDisplay::from_raw`
+    /// to make it usable in smithay. This way `eglTerminate` will be skipped and you
+    /// can clean up the display externally.
+    pub unsafe fn new<N>(native: N) -> Result<EGLDisplay, Error>
     where
         N: EGLNativeDisplay + 'static,
     {
@@ -156,8 +203,10 @@ impl EGLDisplay {
 
         let dp_extensions = ffi::make_sure_egl_is_loaded()?;
         debug!("Supported EGL client extensions: {:?}", dp_extensions);
+        let surface_type = native.surface_type();
+
         // we create an EGLDisplay
-        let (display, platform) = unsafe { select_platform_display(&native, &dp_extensions)? };
+        let (display, platform) = unsafe { select_platform_display(native, &dp_extensions)? };
         span.record("platform", platform);
 
         // We can then query the egl api version
@@ -165,8 +214,10 @@ impl EGLDisplay {
             let mut major: MaybeUninit<ffi::egl::types::EGLint> = MaybeUninit::uninit();
             let mut minor: MaybeUninit<ffi::egl::types::EGLint> = MaybeUninit::uninit();
 
-            wrap_egl_call_bool(|| ffi::egl::Initialize(display, major.as_mut_ptr(), minor.as_mut_ptr()))
-                .map_err(Error::InitFailed)?;
+            wrap_egl_call_bool(|| {
+                ffi::egl::Initialize(display.handle, major.as_mut_ptr(), minor.as_mut_ptr())
+            })
+            .map_err(Error::InitFailed)?;
 
             let major = major.assume_init();
             let minor = minor.assume_init();
@@ -180,11 +231,11 @@ impl EGLDisplay {
 
         // the list of extensions supported by the client once initialized is different from the
         // list of extensions obtained earlier
-        let extensions = EGLDisplay::get_extensions(egl_version, display)?;
+        let extensions = EGLDisplay::get_extensions(egl_version, display.handle)?;
         info!("Supported EGL display extensions: {:?}", extensions);
 
         let (dmabuf_import_formats, dmabuf_render_formats) =
-            get_dmabuf_formats(&display, &extensions).map_err(Error::DisplayCreationError)?;
+            get_dmabuf_formats(&display.handle, &extensions).map_err(Error::DisplayCreationError)?;
 
         // egl <= 1.2 does not support OpenGL ES (maybe we want to support OpenGL in the future?)
         if egl_version <= (1, 2) {
@@ -193,16 +244,12 @@ impl EGLDisplay {
         wrap_egl_call_bool(|| unsafe { ffi::egl::BindAPI(ffi::egl::OPENGL_ES_API) })
             .map_err(|source| Error::OpenGlesNotSupported(Some(source)))?;
 
-        let surface_type = native.surface_type();
         let has_fences = extensions.iter().any(|s| s == "EGL_KHR_fence_sync");
         let supports_native_fences =
             has_fences && extensions.iter().any(|s| s == "EGL_ANDROID_native_fence_sync");
 
         Ok(EGLDisplay {
-            display: Arc::new(EGLDisplayHandle {
-                handle: display,
-                _native: Box::new(native) as Box<dyn std::any::Any + 'static>,
-            }),
+            display,
             surface_type,
             egl_version,
             extensions,
@@ -220,6 +267,8 @@ impl EGLDisplay {
     ///
     /// - The display must be created from the system default EGL library (`dlopen("libEGL.so")`)
     /// - The `display` and `config` must be valid for the lifetime of the returned display and any handles created by this display (using [`EGLDisplay::get_display_handle`])
+    /// - smithay can't track the parameters used to create this display, which may cause two Displays to point to the same underlying instance. For this reason displays created
+    ///   using this method will not call `eglTerminate` on destruction. You will have to cleanup manually.
     pub unsafe fn from_raw(display: *const c_void, config_id: *const c_void) -> Result<EGLDisplay, Error> {
         let span = info_span!("egl", platform = "unknown/raw", version = tracing::field::Empty);
 
@@ -289,6 +338,7 @@ impl EGLDisplay {
         Ok(EGLDisplay {
             display: Arc::new(EGLDisplayHandle {
                 handle: display,
+                should_terminate: false,
                 _native: Box::new(()),
             }),
             surface_type,
