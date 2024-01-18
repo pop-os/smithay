@@ -143,7 +143,7 @@ impl<R: From<GlesRenderer> + Renderer<Error = GlesError>> GraphicsApi for GbmGle
     type Error = Error;
 
     fn enumerate(&self, list: &mut Vec<Self::Device>) -> Result<(), Self::Error> {
-        self.wants_enumeration.store(true, Ordering::SeqCst);
+        self.wants_enumeration.store(false, Ordering::SeqCst);
 
         // remove old stuff
         list.retain(|renderer| {
