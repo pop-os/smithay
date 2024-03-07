@@ -98,6 +98,8 @@ bitflags::bitflags! {
         /// Include the toplevel surface
         const TOPLEVEL = 1;
         /// Include all subsurfaces
+        ///
+        /// This value only works in addition to either `TOPLEVEL` or `POPUP`.
         const SUBSURFACE = 2;
         /// Include all popup surfaces
         const POPUP = 4;
@@ -349,10 +351,12 @@ impl Window {
                 }
             }
 
-            under_from_surface_tree(surface, point, (0, 0), surface_type)
-        } else {
-            None
+            if surface_type.contains(WindowSurfaceType::TOPLEVEL) {
+                return under_from_surface_tree(surface, point, (0, 0), surface_type);
+            }
         }
+
+        None
     }
 
     /// Returns the underlying xdg toplevel surface
